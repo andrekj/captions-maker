@@ -45,12 +45,12 @@ Isi `requirements.txt`: `faster-whisper>=1.0.0`, `customtkinter>=5.2.0`.
 
 - Varian desktop: double-click **`start_captions_maker_ctk.bat`**
 
-Script memakai Python dari Hermes venv (`%LOCALAPPDATA%\hermes\hermes-agent\venv`) jika ada, fallback ke `python` di PATH.
+Script launcher memakai Python dari venv lokal jika ada, fallback ke `python` di PATH.
 
 ### Manual
 
 ```bash
-cd "C:/Users/akj/Desktop/Captions Maker"
+cd path/ke/Captions\ Maker
 python captions_maker_server.py
 # buka http://127.0.0.1:8770/captions-maker.html
 ```
