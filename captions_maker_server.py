@@ -11,19 +11,75 @@ SETTINGS_FILE = ROOT / 'ai_settings.json'
 MODEL_SIZE = os.environ.get('WHISPER_MODEL', 'small')
 _model = None; _lock = threading.Lock()
 
+def _bin(name):
+    """Bundled ffmpeg/ffprobe preferred; fallback ke system PATH."""
+    local = ROOT / 'tools' / 'ffmpeg' / (name + '.exe')
+    return str(local) if local.exists() else name
+
+FFMPEG = _bin('ffmpeg')
+FFPROBE = _bin('ffprobe')
+
 class TranscriptionCancelled(Exception):
     pass
+
+def detect_device():
+    """Auto: GPU (CUDA) kalau tersedia, fallback CPU. Bisa di-override via env."""
+    device = os.environ.get('WHISPER_DEVICE')
+    if device:
+        return device, os.environ.get('WHISPER_COMPUTE') or ('float16' if device == 'cuda' else 'int8')
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            return 'cuda', os.environ.get('WHISPER_COMPUTE', 'float16')
+    except Exception:
+        pass
+    return 'cpu', os.environ.get('WHISPER_COMPUTE', 'int8')
 
 def get_model():
     global _model
     with _lock:
         if _model is None:
+            # Pastikan cuBLAS DLLs tersedia di folder ctranslate2 (Windows).
+            _ensure_cublas_dlls()
             from faster_whisper import WhisperModel
-            device = os.environ.get('WHISPER_DEVICE', 'cpu')
-            compute = os.environ.get('WHISPER_COMPUTE', 'int8' if device == 'cpu' else 'float16')
+            device, compute = detect_device()
+            candidates = [(device, compute)]
+            if device == 'cuda':
+                candidates.append(('cuda', 'int8'))
+                candidates.append(('cpu', 'int8'))
+            for cdev, ccomp in candidates:
+                try:
+                    _model = WhisperModel(MODEL_SIZE, device=cdev, compute_type=ccomp)
+                    device, compute = cdev, ccomp
+                    break
+                except Exception as exc:
+                    print(f'[whisper] {cdev}/{ccomp} gagal ({exc}); coba berikutnya', flush=True)
+            if _model is None:
+                raise RuntimeError('Whisper gagal dimuat di semua device')
             print(f'Loading Whisper {MODEL_SIZE} on {device}/{compute}...', flush=True)
-            _model = WhisperModel(MODEL_SIZE, device=device, compute_type=compute)
     return _model
+
+def _ensure_cublas_dlls():
+    """Copy cuBLAS DLLs ke folder ctranslate2 kalau belum ada.
+    Fix Windows: ctranslate2.dll cari cublas64_12.dll di direktori sendiri,
+    bukan via PATH/add_dll_directory."""
+    try:
+        import site
+        ct2_dir = None
+        for p in site.getsitepackages():
+            cand = Path(p) / 'ctranslate2'
+            if (cand / 'ctranslate2.dll').exists():
+                ct2_dir = cand
+                break
+        if ct2_dir is None:
+            return
+        for p in site.getsitepackages():
+            for dll in (Path(p) / 'nvidia' / 'cublas' / 'bin').glob('*.dll'):
+                dst = ct2_dir / dll.name
+                if not dst.exists():
+                    shutil.copy2(dll, dst)
+    except Exception:
+        pass
 
 def write_progress(target, **fields):
     """target = project folder OR full path to progress.json."""
@@ -300,11 +356,25 @@ def source_video(folder):
 
 def probe_duration(video):
     try:
-        cmd=['ffprobe','-v','error','-show_entries','format=duration','-of','csv=p=0',str(video)]
+        cmd=[FFPROBE,'-v','error','-show_entries','format=duration','-of','csv=p=0',str(video)]
         out=subprocess.run(cmd,capture_output=True,text=True,timeout=30).stdout.strip()
         return float(out) if out else None
     except Exception:
         return None
+
+def probe_gpu_encoder():
+    """Auto: GPU encoder kalau FFmpeg support (NVENC > QSV > AMF), fallback libx264 CPU."""
+    try:
+        out = subprocess.run([FFMPEG,'-hide_banner','-encoders'],capture_output=True,text=True,timeout=10).stdout
+        if 'h264_nvenc' in out:
+            return 'h264_nvenc', {'preset':'p5','cq':'20'}
+        if 'h264_qsv' in out:
+            return 'h264_qsv', {'preset':'veryslow','global_quality':'20'}
+        if 'h264_amf' in out:
+            return 'h264_amf', {'quality':'quality','rc':'cqp','qp_i':'20','qp_p':'20'}
+    except Exception:
+        pass
+    return 'libx264', {'preset':'veryfast','crf':'20'}
 
 def render_worker(pid, style, data):
     folder = PROJECTS / pid
@@ -318,40 +388,56 @@ def render_worker(pid, style, data):
         output=folder/'captioned_output.mp4'
         if output.exists():
             output.unlink()
-        probe_cmd=['ffprobe','-v','error','-select_streams','a','-show_entries','stream=index','-of','csv=p=0',str(video)]
+        probe_cmd=[FFPROBE,'-v','error','-select_streams','a','-show_entries','stream=index','-of','csv=p=0',str(video)]
         probe=subprocess.run(probe_cmd,capture_output=True,text=True,timeout=30,cwd=str(folder))
         has_audio=probe.returncode==0 and probe.stdout.strip()!=''
         duration=probe_duration(video)
         write_progress(folder/'render_progress.json', stage='rendering', percent=0, message='Menjalankan FFmpeg…')
-        cmd=['ffmpeg','-y','-i',str(video),'-vf','ass=captions.ass','-c:v','libx264','-preset','veryfast','-crf','20','-progress','pipe:1','-nostats','-loglevel','error']
-        if has_audio:
-            cmd.extend(['-c:a','aac','-b:a','128k'])
-        cmd.extend(['-movflags','+faststart',str(output)])
-        proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,cwd=str(folder))
-        last_pct=0
-        for line in proc.stdout:
-            line=line.strip()
-            if line.startswith('out_time_us='):
-                try:
-                    us=int(line.split('=',1)[1])
-                    if duration:
-                        last_pct=min(99,round(100*us/1e6/duration))
-                        write_progress(folder/'render_progress.json', stage='rendering', percent=last_pct, message=f'Render {last_pct}%…')
-                except ValueError:
-                    pass
-            if (folder/'render_cancel.txt').exists():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                write_progress(folder/'render_progress.json', stage='cancelled', percent=0, message='Render dibatalkan')
-                return
-        proc.wait(timeout=30)
-        if proc.returncode:
-            err=proc.stderr.read()
-            raise RuntimeError(err[-3000:] if err else 'FFmpeg error')
-        write_progress(folder/'render_progress.json', stage='done', percent=100, message='Selesai')
+        enc, enc_params = probe_gpu_encoder()
+        if enc == 'libx264':
+            attempts = [('libx264', {'preset': 'veryfast', 'crf': '20'})]
+        else:
+            attempts = [(enc, enc_params), ('libx264', {'preset': 'veryfast', 'crf': '20'})]
+        err = None
+        for attempt_enc, attempt_params in attempts:
+            cmd = [FFMPEG, '-y', '-i', str(video), '-vf', 'ass=captions.ass', '-c:v', attempt_enc]
+            for key, value in attempt_params.items():
+                cmd.extend(['-'+key, str(value)])
+            cmd.extend(['-progress', 'pipe:1', '-nostats', '-loglevel', 'error'])
+            if has_audio:
+                cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
+            cmd.extend(['-movflags', '+faststart', str(output)])
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(folder))
+            last_pct = 0
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith('out_time_us='):
+                    try:
+                        us = int(line.split('=', 1)[1])
+                        if duration:
+                            last_pct = min(99, round(100 * us / 1e6 / duration))
+                            write_progress(folder/'render_progress.json', stage='rendering', percent=last_pct, message=f'Render {last_pct}%…')
+                    except ValueError:
+                        pass
+                if (folder/'render_cancel.txt').exists():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    write_progress(folder/'render_progress.json', stage='cancelled', percent=0, message='Render dibatalkan')
+                    return
+            proc.wait(timeout=30)
+            if proc.returncode:
+                err = (proc.stderr.read() or '')[-3000:]
+                if attempt_enc != 'libx264':
+                    print(f'[render] {attempt_enc} gagal; fallback libx264: {err[:200]}', flush=True)
+                    continue
+                raise RuntimeError(err)
+            err = None
+            break
+        if err is None:
+            write_progress(folder/'render_progress.json', stage='done', percent=100, message='Selesai')
     except Exception as exc:
         try:
             write_progress(folder/'render_progress.json', stage='error', percent=0, message=str(exc))

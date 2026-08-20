@@ -4,6 +4,9 @@ caption_projects/
 server.log
 *.log
 
+# --- binary lokal: ffmpeg 8.0.1 (195MB, di atas limit GitHub 100MB) ---
+tools/ffmpeg/
+
 # --- Python build artifacts ---
 __pycache__/
 *.pyc

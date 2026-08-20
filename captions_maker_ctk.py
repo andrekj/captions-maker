@@ -77,7 +77,11 @@ class CaptionsMaker(ctk.CTk):
         ctk.CTkFrame(side, height=1, fg_color=BORDER).pack(fill="x", padx=22, pady=(35, 18))
         ctk.CTkLabel(side, text="PROCESSING", text_color=MUTED,
                      font=ctk.CTkFont(size=10, weight="bold")).pack(anchor="w", padx=22)
-        ctk.CTkLabel(side, text="Whisper small\nCPU int8 · FFmpeg", text_color=MINT,
+        whisper_dev, whisper_compute = engine.detect_device()
+        enc, _ = engine.probe_gpu_encoder()
+        engine_label = "GPU" if enc != "libx264" else "CPU"
+        ctk.CTkLabel(side, text=f"Whisper {engine.MODEL_SIZE}\n{whisper_dev.upper()} {whisper_compute} · FFmpeg {engine_label}",
+                     text_color=MINT,
                      justify="left", anchor="w", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=22, pady=(7, 0))
 
     def _build_main(self):
@@ -303,10 +307,20 @@ class CaptionsMaker(ctk.CTk):
             ass = folder / "captions.ass"
             ass.write_text(engine.make_ass(self.project, style), encoding="utf8")
             output = folder / "captioned_output.mp4"
-            cmd = ["ffmpeg", "-y", "-i", str(video), "-vf", "ass=captions.ass", "-c:v", "libx264",
-                   "-preset", "veryfast", "-crf", "20", "-c:a", "copy", "-movflags", "+faststart", str(output)]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=str(folder))
-            if result.returncode:
+            enc, enc_params = engine.probe_gpu_encoder()
+            attempts = [(enc, enc_params)] if enc == "libx264" else [(enc, enc_params), ("libx264", {"preset": "veryfast", "crf": "20"})]
+            result = None
+            for attempt_enc, attempt_params in attempts:
+                cmd = [engine.FFMPEG, "-y", "-i", str(video), "-vf", "ass=captions.ass", "-c:v", attempt_enc]
+                for key, value in attempt_params.items():
+                    cmd.extend(["-" + key, str(value)])
+                cmd.extend(["-c:a", "copy", "-movflags", "+faststart", str(output)])
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=str(folder))
+                if result.returncode == 0:
+                    break
+                if attempt_enc != "libx264":
+                    print(f"[render] {attempt_enc} gagal; fallback libx264", flush=True)
+            if result and result.returncode:
                 raise RuntimeError(result.stderr[-2500:])
             self.events.put(("rendered", output))
         except Exception as exc:
