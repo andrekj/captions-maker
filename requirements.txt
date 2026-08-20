@@ -1,0 +1,7 @@
+# Captions Maker — dependencies
+# Install: python -m pip install -r requirements.txt
+# Web UI (captions-maker.html) hanya butuh faster-whisper.
+# customtkinter hanya untuk varian desktop (captions_maker_ctk.py).
+
+faster-whisper>=1.0.0
+customtkinter>=5.2.0

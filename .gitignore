@@ -1,0 +1,16 @@
+# --- rahasia & data lokal (JANGAN di-upload) ---
+ai_settings.json
+caption_projects/
+server.log
+*.log
+
+# --- Python build artifacts ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- OS / editor ---
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
