@@ -27,7 +27,7 @@ Aplikasi web lokal untuk membuat caption video dengan transkripsi **Whisper** (f
 ## Instalasi
 
 ```bash
-cd "C:/Users/akj/Desktop/Captions Maker"
+cd path/ke/Captions\ Maker
 python -m pip install -r requirements.txt
 ```
 
