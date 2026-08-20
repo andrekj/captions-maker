@@ -27,7 +27,7 @@ Aplikasi web lokal untuk membuat caption video dengan transkripsi **Whisper** (f
 ## Instalasi
 
 ```bash
-cd path/ke/Captions\ Maker
+cd path/captions-maker
 python -m pip install -r requirements.txt
 ```
 
@@ -50,7 +50,7 @@ Script launcher memakai Python dari venv lokal jika ada, fallback ke `python` di
 ### Manual
 
 ```bash
-cd path/ke/Captions\ Maker
+cd path/captions-maker
 python captions_maker_server.py
 # buka http://127.0.0.1:8770/captions-maker.html
 ```
